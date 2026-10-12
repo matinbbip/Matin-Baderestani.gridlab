@@ -11,18 +11,6 @@ Pages
 
 Data comes straight from the browser to https://api.openf1.org (historical data is free). Requests are spaced out and cached in IndexedDB, so the first load of a race is slower than the next ones. OpenF1 can restrict access while a live session is running.
 
-## Put it online with the GitHub free plan (GitHub Pages)
-
-1. Create a free account at https://github.com.
-2. Click New repository. Name it, for example, gridlab. Choose Public (GitHub Pages is free for public repositories). Click Create repository.
-3. Click "uploading an existing file". Select ALL files from this folder: index.html, timing.html, sectors.html, strategy.html, onboard.html, style.css, app.js, pages.js and README.md. The file names must stay exactly the same, and index.html must stay named index.html.
-4. Click Commit changes.
-5. Open Settings, then Pages. Under Build and deployment choose Deploy from a branch, pick the main branch and the / (root) folder, then Save.
-6. Wait one or two minutes. Your site is at https://YOUR-USERNAME.github.io/gridlab/
-
-Updating: open the repository, click Add file, then Upload files, and upload the changed files again. The site refreshes in a minute.
-
-Tips for a phone: GitHub's mobile website is easier to use with "Desktop site" turned on in the browser menu.
 
 ## Test before uploading
 
