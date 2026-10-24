@@ -329,13 +329,152 @@ pages.strategy = async function () {
 };
 
 /* =========================================================
+   SESSIONS (practice, qualifying, sprint, race)
+   ========================================================= */
+pages.sessions = async function () {
+  const race = await G.boot('sessions'); if (!race) return;
+  const app = $('#app'); app.innerHTML = G.loading('Loading the race weekend…');
+  let all;
+  try { all = await G.api('sessions', { meeting_key: race.meeting }); } catch (e) { return G.fail(e); }
+  const list = all.filter(s => G.ts(s.date_end) != null && G.ts(s.date_end) < Date.now()).sort((a, b) => G.ts(a.date_start) - G.ts(b.date_start));
+  if (!list.length) { app.innerHTML = head(race) + '<p class="note">OpenF1 has no finished sessions for this weekend.</p>'; return; }
+  const qp = new URLSearchParams(location.search);
+  let cur = list.find(s => String(s.session_key) === qp.get('x')) || list[list.length - 1];
+  const day = s => new Date(G.ts(s.date_start)).toLocaleDateString('en-GB', { weekday: 'short' });
+  app.innerHTML = head(race) + '<div class="stabs" id="stabs" role="tablist"></div><div id="sbody"></div>';
+  let token = 0;
+  function drawTabs() {
+    $('#stabs').innerHTML = list.map(s => '<button type="button" class="stab" role="tab" aria-selected="' + (s.session_key === cur.session_key) + '" data-k="' + s.session_key + '"><b>' + esc(s.session_name) + '</b><span>' + day(s) + '</span></button>').join('');
+    $$('#stabs .stab').forEach(b => b.onclick = () => { cur = list.find(s => String(s.session_key) === b.dataset.k); drawTabs(); load(); });
+  }
+  async function load() {
+    const tok = ++token, body = $('#sbody'), isRace = /^race$/i.test(cur.session_name);
+    history.replaceState(null, '', '?s=' + race.key + '&x=' + cur.session_key);
+    body.innerHTML = G.loading('Loading ' + cur.session_name + '…');
+    let dr, laps, stints, res = [];
+    try { [dr, laps, stints] = await Promise.all([G.getDrivers(cur.session_key), G.api('laps', { session_key: cur.session_key }), G.api('stints', { session_key: cur.session_key })]); if (isRace) res = await G.getResult(cur.session_key); }
+    catch (e) { if (tok === token) body.innerHTML = '<div class="note err"><b>Could not load this session</b><p>' + esc(e.message) + '</p></div>'; return; }
+    if (tok !== token) return;
+    const by = G.groupLaps(laps);
+    let rows = dr.list.filter(d => by.has(d.driver_number)).map(d => {
+      const L = by.get(d.driver_number), last = L.length ? L[L.length - 1].lap_number : 0;
+      let best = null, top = 0;
+      L.forEach(l => { if (l.lap_duration > 0 && (best == null || l.lap_duration < best)) best = l.lap_duration; top = Math.max(top, l.st_speed || 0, l.i1_speed || 0, l.i2_speed || 0); });
+      const st = stints.filter(x => x.driver_number === d.driver_number).sort((a, b) => a.lap_start - b.lap_start).map(x => ({ c: x.compound, n: (x.lap_end == null ? last : x.lap_end) - x.lap_start + 1 }));
+      return { d, best, top: top || null, st };
+    });
+    if (!rows.length) { body.innerHTML = '<p class="note">No lap data for this session.</p>'; return; }
+    if (isRace && res.length) { const o = new Map(res.map((r, i) => [r.num, i])); rows.sort((a, b) => (o.has(a.d.driver_number) ? o.get(a.d.driver_number) : 99) - (o.has(b.d.driver_number) ? o.get(b.d.driver_number) : 99)); }
+    else rows.sort((a, b) => (a.best == null ? 1e9 : a.best) - (b.best == null ? 1e9 : b.best));
+    const fastest = Math.min(...rows.map(r => r.best).filter(Boolean)), topMax = Math.max(0, ...rows.map(r => r.top || 0));
+    body.innerHTML = '<div class="scroll"><table class="tbl sess"><thead><tr><th>Pos</th><th>Driver</th><th>Team</th><th>Tyres</th><th class="r">Best lap</th><th class="r">Gap</th><th class="r">Top speed</th></tr></thead><tbody>' +
+      rows.map((r, i) => '<tr><td class="n"><span class="pos">' + (i + 1) + '</span></td><td><span class="tc" style="--tc:' + r.d.color + '"></span>' +
+        (r.d.headshot_url ? '<img class="hs" loading="lazy" alt="" src="' + esc(r.d.headshot_url) + '" onerror="this.style.display=\'none\'">' : '') +
+        '<b class="acr" style="color:' + r.d.color + '">' + esc(r.d.acr) + '</b></td><td class="muted">' + esc(r.d.team_name || '') + '</td>' +
+        '<td><div class="tyres">' + (r.st.map(s => '<span class="tyre">' + G.cdot(s.c) + '<b>' + s.n + '</b></span>').join('') || '<span class="muted">–</span>') + '</div></td>' +
+        '<td class="n r ' + (r.best === fastest ? 'pp' : '') + '"><b>' + G.lapTime(r.best) + '</b></td>' +
+        '<td class="n r muted">' + (r.best && r.best !== fastest ? '+' + (r.best - fastest).toFixed(3) : '') + '</td>' +
+        '<td class="n r ' + (r.top && r.top === topMax ? 'pp' : '') + '">' + (r.top ? r.top + ' km/h' : '–') + '</td></tr>').join('') + '</tbody></table></div>' +
+      '<p class="note">' + (isRace ? 'Ordered by finishing position. Best lap, gap and top speed are the driver’s own race laps.' : 'Ordered by best lap. Qualifying knockout segments (Q1, Q2, Q3) are not split out. Tyre chips show the compound and laps run on each set.') + ' Top speed is the highest speed trap or intermediate speed recorded.</p>';
+  }
+  drawTabs(); load();
+};
+
+/* =========================================================
+   CALENDAR (schedule from the Jolpica Ergast API, countdowns live)
+   ========================================================= */
+pages.calendar = async function () {
+  await G.boot('calendar', { light: true });
+  const app = $('#app'); app.innerHTML = G.loading('Loading the calendar…');
+  const JOL = 'https://api.jolpi.ca/ergast/f1/';
+  const toTs = o => { if (!o || !o.date) return null; let t = o.time || '00:00:00Z'; if (!/Z|[+-]\d\d:?\d\d$/.test(t)) t += 'Z'; const v = Date.parse(o.date + 'T' + t); return isNaN(v) ? null : v; };
+  const KEYS = [['FirstPractice', 'Practice 1', 60], ['SecondPractice', 'Practice 2', 60], ['ThirdPractice', 'Practice 3', 60], ['SprintQualifying', 'Sprint Qualifying', 50], ['SprintShootout', 'Sprint Qualifying', 50], ['Sprint', 'Sprint', 40], ['Qualifying', 'Qualifying', 60]];
+  async function season(y) { const j = await G.cached(JOL + y + '.json?limit=100', 36e5); return (j && j.MRData && j.MRData.RaceTable && j.MRData.RaceTable.Races) || []; }
+  function weekends(races) {
+    return races.map(r => {
+      const ss = []; KEYS.forEach(k => { const t = toTs(r[k[0]]); if (t != null) ss.push({ name: k[1], start: t, mins: k[2] }); });
+      const rt = toTs(r); if (rt != null) ss.push({ name: 'Race', start: rt, mins: 120 });
+      ss.sort((a, b) => a.start - b.start);
+      if (!ss.length) return null;
+      const last = ss[ss.length - 1];
+      return { r, round: Number(r.round), name: r.raceName, ss, start: ss[0].start, race: last, end: last.start + last.mins * 60e3 };
+    }).filter(Boolean);
+  }
+  let y = new Date().getFullYear(), W;
+  try {
+    W = weekends(await season(y));
+    if (!W.length || W.every(w => w.end < Date.now())) { const nx = weekends(await season(y + 1)); if (nx.length) { y += 1; W = nx; } }
+  } catch (e) { return G.fail(e); }
+  if (!W.length) { app.innerHTML = '<h1>Formula 1 Calendar</h1><p class="note">No schedule is published for this season yet.</p>'; return; }
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+  const fmtDay = (t, o) => new Date(t).toLocaleDateString('en-GB', o);
+  const dayTime = t => fmtDay(t, { weekday: 'short', day: 'numeric', month: 'short' }) + ' · ' + new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  const range = w => { const a = new Date(w.start), b = new Date(w.race.start); const m = d => d.toLocaleDateString('en-GB', { month: 'short' }); return a.getMonth() === b.getMonth() ? a.getDate() + '–' + b.getDate() + ' ' + m(b) : a.getDate() + ' ' + m(a) + ' – ' + b.getDate() + ' ' + m(b); };
+  const cd = ms => { const s = Math.max(0, Math.floor(ms / 1000)); return { d: Math.floor(s / 86400), h: Math.floor(s % 86400 / 3600), m: Math.floor(s % 3600 / 60), s: s % 60 }; };
+  const cdHtml = ms => { const c = cd(ms); return '<div class="cd">' + [[c.d, 'days'], [c.h, 'hours'], [c.m, 'minutes'], [c.s, 'seconds']].map(x => '<div><b class="num">' + x[0] + '</b><span>' + x[1] + '</span></div>').join('') + '</div>'; };
+  const now0 = Date.now(), done0 = W.filter(w => w.end < now0).length, pct = Math.round(done0 / W.length * 100);
+  const nextW = W.find(w => w.end >= now0) || null;
+
+  let h = '<h1>Formula 1 Calendar ' + y + '</h1><p class="lede">Complete ' + y + ' race calendar with all event dates and circuit locations. Times are in your local time (' + esc(tz) + ').</p><div class="prog"><div class="pl"><span>' + done0 + ' of ' + W.length + ' races completed</span><span>' + pct + '%</span></div><div class="pt"><i style="width:' + pct + '%"></i></div></div>';
+  if (nextW) {
+    const loc = nextW.r.Circuit && nextW.r.Circuit.Location || {};
+    h += '<section class="ncard"><div class="ntop"><span class="badge">Next race</span><span class="muted">Round ' + nextW.round + ' of ' + W.length + '</span></div><h2 class="nname">' + esc(nextW.name) + '</h2><p class="muted">' + esc(loc.country || '') + (loc.locality ? ' · ' + esc(loc.locality) : '') + ' · ' + range(nextW) + '</p>' +
+      '<div class="ngrid"><ul class="slist" id="slist"></ul><div id="cds"></div><div class="cmap" id="cmap"></div></div></section>';
+  } else h += '<p class="note">The ' + y + ' season is complete.</p>';
+  h += '<section class="block"><h2>All rounds</h2><div class="scroll"><table class="tbl"><thead><tr><th>Round</th><th>Grand Prix</th><th>Circuit</th><th>Dates</th><th>Status</th></tr></thead><tbody>' +
+    W.map(w => { const st = w.end < now0 ? 'Completed' : (nextW && w.round === nextW.round ? 'Next' : 'Upcoming'); const c = w.r.Circuit || {}; return '<tr><td class="n">' + w.round + '</td><td><b>' + esc(w.name) + '</b></td><td class="muted">' + esc(c.circuitName || '') + '</td><td class="n">' + range(w) + '</td><td>' + (st === 'Next' ? '<span class="pill">Next</span>' : '<span class="' + (st === 'Completed' ? 'muted' : '') + '">' + st + '</span>') + '</td></tr>'; }).join('') + '</tbody></table></div></section>';
+  app.innerHTML = h;
+  if (!nextW) return;
+
+  function tick() {
+    const now = Date.now();
+    const next = nextW.ss.find(s => s.start > now);
+    const live = nextW.ss.find(s => s.start <= now && now < s.start + s.mins * 60e3);
+    $('#slist').innerHTML = nextW.ss.map(s => {
+      const over = now >= s.start + s.mins * 60e3, isLive = live === s;
+      return '<li class="' + (s.name === 'Race' ? 'race ' : '') + (over ? 'over' : '') + '"><b>' + esc(s.name) + '</b><span>' + (isLive ? '<em class="livepill">Live now</em>' : dayTime(s.start)) + '</span></li>';
+    }).join('');
+    let c = '';
+    if (live && live.name !== 'Race') c += '<h3 class="cdt">' + esc(live.name) + ' is live</h3>';
+    if (next && next.name !== 'Race') c += '<h3 class="cdt">' + esc(next.name) + ' in:</h3>' + cdHtml(next.start - now);
+    const rc = nextW.race;
+    if (rc.start > now) c += '<h3 class="cdt">Race' + (next && next.name === 'Race' ? ' in:' : '') + '</h3>' + cdHtml(rc.start - now);
+    else if (live && live.name === 'Race') c += '<h3 class="cdt">The race is live</h3>';
+    $('#cds').innerHTML = c;
+  }
+  tick(); setInterval(tick, 1000);
+
+  /* circuit outline, best effort from a past race at the same place */
+  (async function () {
+    const box = $('#cmap');
+    try {
+      const loc = nextW.r.Circuit.Location.locality;
+      const ss = await G.api('sessions', { session_name: 'Race', location: loc }, 36e5);
+      const past = ss.filter(s => G.ts(s.date_end) < Date.now()).sort((a, b) => G.ts(b.date_start) - G.ts(a.date_start))[0];
+      if (!past) { box.remove(); return; }
+      const laps = await G.api('laps', { session_key: past.session_key, lap_number: 8 });
+      const l = laps.find(x => x.date_start && x.lap_duration > 0);
+      if (!l) { box.remove(); return; }
+      const s = G.ts(l.date_start), iso = t => new Date(t).toISOString();
+      const pts = (await G.api('location', { session_key: past.session_key, driver_number: l.driver_number, 'date>=': iso(s), 'date<': iso(s + l.lap_duration * 1000) })).filter(p => !(p.x === 0 && p.y === 0));
+      if (pts.length < 20) { box.remove(); return; }
+      const P = G.projector(pts.map(p => [p.x, p.y]), 420, 300, 22), d = 'M' + pts.map(p => { const q = P(p.x, p.y); return q[0].toFixed(1) + ',' + q[1].toFixed(1); }).join('L');
+      box.innerHTML = '<svg class="map" viewBox="0 0 420 300" role="img" aria-label="Circuit outline"><path class="base" d="' + d + '"/><path d="' + d + '" fill="none" style="stroke:var(--ink)" stroke-width="2.5" stroke-linejoin="round"/></svg>';
+    } catch (e) { box.remove(); }
+  })();
+};
+
+/* =========================================================
    ONBOARD
    ========================================================= */
 pages.onboard = async function () {
   const race = await G.boot('onboard'); if (!race) return;
   const app = $('#app'); app.innerHTML = G.loading('Loading drivers and laps…');
-  let dr, laps, res, ots;
-  try { [dr, laps, res, ots] = await Promise.all([G.getDrivers(race.key), G.api('laps', { session_key: race.key }), G.getResult(race.key), G.api('overtakes', { session_key: race.key }).catch(() => [])]); } catch (e) { return G.fail(e); }
+  let dr, laps, res, ots, posRaw;
+  try {
+    [dr, laps, res, ots, posRaw] = await Promise.all([G.getDrivers(race.key), G.api('laps', { session_key: race.key }), G.getResult(race.key),
+      G.api('overtakes', { session_key: race.key }).catch(() => []), G.api('position', { session_key: race.key }).catch(() => [])]);
+  } catch (e) { return G.fail(e); }
   const by = G.groupLaps(laps), med = G.median(laps.map(l => l.lap_duration > 0 ? l.lap_duration : null));
   const order = res.map(r => r.num).filter(n => dr.map.has(n)); dr.list.forEach(d => { if (!order.includes(d.driver_number)) order.push(d.driver_number); });
   const qp = new URLSearchParams(location.search);
@@ -346,20 +485,33 @@ pages.onboard = async function () {
   const bestLapOf = n => { let b = null; (by.get(n) || []).forEach(l => { if (l.lap_duration > 0 && (!b || l.lap_duration < b.lap_duration)) b = l; }); return b; };
   const lapOf = (num, t) => { let n = null; for (const l of by.get(num) || []) { const s = G.ts(l.date_start); if (s != null && s <= t) n = l.lap_number; } return n == null ? 1 : n; };
 
+  /* running order index from the position feed */
+  const posBy = new Map();
+  for (const r of posRaw) { const tt = G.ts(r.date); if (tt == null || !dr.map.has(r.driver_number)) continue; let a = posBy.get(r.driver_number); if (!a) { a = { t: [], p: [] }; posBy.set(r.driver_number, a); } a.t.push(tt); a.p.push(r.position); }
+  for (const a of posBy.values()) { const ix = a.t.map((_, i) => i).sort((x, y) => a.t[x] - a.t[y]); a.t = ix.map(i => a.t[i]); a.p = ix.map(i => a.p[i]); }
+  const orderAt = ts => { const out = []; posBy.forEach((a, n) => { const i = G.bsearch(a.t, ts); out.push({ n, p: a.p[i < 0 ? 0 : i] }); }); out.sort((x, y) => x.p - y.p); return out; };
+  const ROW = 30;
+
   app.innerHTML = head(race).replace('<h1>', '<h1>Onboard · ') +
     '<div class="panel" style="margin-top:20px"><div class="controls"><label>Driver<select id="drv">' + order.map(n => '<option value="' + n + '">' + esc(dr.map.get(n).name) + '</option>').join('') + '</select></label>' +
     '<label>Lap<select id="lap"></select></label><div class="btns"><button class="btn" id="bStart" type="button">Race start</button><button class="btn ghost" id="bFast" type="button">Driver’s fastest lap</button><button class="btn ghost" id="bPrev" type="button">Previous lap</button><button class="btn ghost" id="bNext" type="button">Next lap</button></div></div></div>' +
-    '<div class="ob"><div class="panel"><div id="status" class="note" style="padding:0 0 8px"></div><div id="mapHost"></div><div class="transport"><button class="btn" id="play" type="button">Play</button><select id="rate" aria-label="Speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select><input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Position in lap"><span class="num" id="clock">0:00.0</span></div></div>' +
-    '<div class="panel"><div class="read"><div><small>Speed</small><span class="v" id="vSpeed">–</span> <small style="display:inline">km/h</small></div><div><small>Gear</small><span class="v" id="vGear">–</span></div><div><small>DRS</small><span class="v" id="vDrs">–</span></div></div>' +
+    '<div class="ob"><div class="panel"><div id="status" class="note" style="padding:0 0 8px"></div><div id="mapHost"></div><div class="transport"><button class="btn" id="play" type="button">Play</button><select id="rate" aria-label="Speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select><input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Position in lap"><span class="num" id="clock">0:00.0</span></div>' +
+    '<h3 style="margin-top:16px">Overtake feed</h3><div id="feed" class="feed"><span class="muted">Press play. Passes appear here as they happen.</span></div></div>' +
+    '<div class="col2"><div class="panel"><div class="read"><div><small>Speed</small><span class="v" id="vSpeed">–</span> <small style="display:inline">km/h</small></div><div><small>Gear</small><span class="v" id="vGear">–</span></div>' +
+    '<div><small>Active aero</small><svg class="aero" viewBox="0 0 96 40" aria-hidden="true"><rect x="10" y="27" width="76" height="5" rx="2" class="pl"/><rect x="6" y="16" width="4" height="18" rx="1.5" class="ep"/><rect x="86" y="16" width="4" height="18" rx="1.5" class="ep"/><rect id="flap" x="10" y="19" width="76" height="4" rx="2" class="fl"/></svg><span class="v" id="vAero" style="font-size:18px">–</span></div></div>' +
     '<small class="muted">Throttle</small><div class="meter"><i id="mThr"></i></div><small class="muted" style="display:block;margin-top:8px">Brake</small><div class="meter b"><i id="mBrk"></i></div>' +
-    '<div class="trace" id="trace" style="margin-top:14px"></div><p class="note" style="padding-bottom:0">Click or drag the chart to jump. Orange ticks mark passes in this lap.</p></div></div>' +
+    '<div class="trace" id="trace" style="margin-top:14px"></div><p class="note" style="padding-bottom:0">Click or drag the chart to jump. Orange ticks mark passes by this driver. <span id="aeroNote"></span></p></div>' +
+    '<div class="panel"><h3>Live order</h3><p class="note" style="padding:0 0 8px">Positions follow the replay. Click a driver to follow them. Arrows show places gained or lost since the start of this lap.</p><div class="lo-wrap" id="lo"></div></div></div></div>' +
     '<section class="block"><h2>Overtakes</h2><p>Every pass this driver made, plus the places lost. Click one to jump straight to it.</p><div id="ots"></div></section>' +
     '<section class="block"><h2>Watch the real onboard</h2><p>The replay above is rebuilt from official timing telemetry, not video. For actual camera footage use the official sources.</p><div class="links" id="vids"></div></section>';
 
   /* state */
   let D = null, t = 0, playing = false, raf = 0, last = 0, rate = 1, token = 0;
+  const disp = { thr: 0, brk: 0, aero: 0 };
   const status = m => { $('#status').textContent = m || ''; };
   const fmtClock = ms => { const s = ms / 1000, m = Math.floor(s / 60); return m + ':' + (s - m * 60).toFixed(1).padStart(4, '0'); };
+  const lerp = (arr, T, tt) => { const n = T.length, i = G.bsearch(T, tt); if (i < 0) return arr[0]; if (i >= n - 1) return arr[n - 1]; const f = (tt - T[i]) / ((T[i + 1] - T[i]) || 1); return arr[i] + (arr[i + 1] - arr[i]) * f; };
+  const ease = (cur, target, dt, tau) => (dt == null ? target : cur + (target - cur) * (1 - Math.exp(-dt / tau)));
 
   function fillLaps() {
     const L = by.get(sel) || [];
@@ -412,16 +564,22 @@ pages.onboard = async function () {
     const me = cars.get(sel);
     if (!me || me.t.length < 5) { status('OpenF1 has no location data for this lap.'); $('#mapHost').innerHTML = ''; return; }
     car = car.slice().sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
-    const tel = { t: [], speed: [], thr: [], brk: [], gear: [], drs: [] };
+    const tel = { t: [], speed: [], thr: [], brk: [], gear: [], drs: [], aero: [] };
     for (const r of car) { const tt = G.ts(r.date); if (tt == null) continue; tel.t.push(tt - win.start); tel.speed.push(r.speed || 0); tel.thr.push(r.throttle || 0); tel.brk.push(r.brake || 0); tel.gear.push(r.n_gear || 0); tel.drs.push(r.drs || 0); }
+    /* active aero: use the telemetry channel when it carries a real signal, otherwise estimate */
+    const nT = tel.t.length, open = tel.drs.map(v => v >= 8 ? 1 : 0), share = open.reduce((a, b) => a + b, 0) / Math.max(1, nT), chan = share > 0.02 && share < 0.7;
+    const raw = tel.t.map((_, i) => chan ? open[i] : (tel.thr[i] >= 98 && tel.brk[i] === 0 && tel.speed[i] >= 170 ? 1 : 0));
+    tel.aero = raw.map((_, i) => { let s = 0, c = 0; for (let k = i - 2; k <= i + 2; k++) if (k >= 0 && k < nT) { s += raw[k]; c++; } return s / c >= 0.5 ? 1 : 0; });
     const dur = win.end - win.start, P = G.projector(me.x.map((x, i) => [x, me.y[i]]), 600, 420, 24);
-    D = { win, dur, cars, tel, P };
-    /* overtakes inside this window */
+    D = { win, dur, cars, tel, P, chan };
     D.marks = (drawOvertakes.list || []).filter(e => e.ts >= win.start && e.ts <= win.end).map(e => e.ts - win.start);
-    status(''); buildMap(); drawTrace();
+    D.events = (ots || []).map(o => ({ rel: G.ts(o.date) - win.start, a: o.overtaking_driver_number, b: o.overtaken_driver_number, pos: o.position })).filter(e => e.rel >= 0 && e.rel <= dur).sort((x, y) => x.rel - y.rel);
+    D.feedN = -1; D.key = '';
+    $('#aeroNote').textContent = posBy.size ? (chan ? 'Active aero mode comes from the car’s telemetry channel.' : 'Active aero mode is estimated from throttle, brake and speed because OpenF1 has no usable channel for this lap.') : '';
+    status(''); buildMap(); buildOrder(); drawTrace();
     const sc = $('#scrub'); sc.max = dur; sc.value = 0;
     t = seekTs != null ? Math.max(0, Math.min(dur, seekTs - win.start)) : 0;
-    render();
+    render(null);
   }
   function buildMap() {
     const me = D.cars.get(sel);
@@ -430,6 +588,37 @@ pages.onboard = async function () {
     D.cars.forEach((c, n) => { const d = dr.map.get(n); if (!d) return; const me2 = n === sel; g += '<g class="car" data-n="' + n + '"><circle r="' + (me2 ? 8 : 5) + '" style="fill:' + d.color + ';stroke:' + (me2 ? 'var(--ink)' : 'var(--panel)') + ';stroke-width:' + (me2 ? 2.5 : 1.5) + '"/><text x="10" y="-6" style="' + (me2 ? 'font-size:11px' : '') + '">' + esc(d.acr) + '</text></g>'; });
     $('#mapHost').innerHTML = '<svg class="map" viewBox="0 0 600 420" role="img" aria-label="Track map with live car positions"><path class="base" d="' + path + '"/>' + g + '</svg>';
     D.nodes = $$('#mapHost .car').map(el => ({ el, c: D.cars.get(Number(el.dataset.n)) }));
+  }
+  function buildOrder() {
+    const host = $('#lo'); if (!posBy.size) { host.innerHTML = '<p class="note">OpenF1 has no position feed for this race.</p>'; D.rows = []; return; }
+    const start = orderAt(D.win.start); D.base = new Map(start.map((o, i) => [o.n, i + 1]));
+    host.style.height = (start.length * ROW) + 'px';
+    host.innerHTML = start.map((o, i) => { const d = dr.map.get(o.n); return '<div class="lo" data-n="' + o.n + '" style="transform:translateY(' + (i * ROW) + 'px)"><span class="p">' + (i + 1) + '</span><span class="tc" style="--tc:' + d.color + '"></span><b>' + esc(d.acr) + '</b><span class="nm muted">' + esc(d.name) + '</span><span class="dl"></span></div>'; }).join('');
+    D.rows = new Map($$('#lo .lo').map(el => [Number(el.dataset.n), el]));
+    D.rank = new Map(start.map((o, i) => [o.n, i + 1]));
+    $$('#lo .lo').forEach(el => { el.onclick = () => { const n = Number(el.dataset.n); if (n === sel) return; sel = n; $('#drv').value = n; fillLaps(); drawVideos(); drawOvertakes(); load(); }; });
+  }
+  function updateOrder() {
+    if (!D.rows || !D.rows.size) return;
+    const ord = orderAt(D.win.start + t), key = ord.map(o => o.n).join(',');
+    if (key === D.key) return; D.key = key;
+    ord.forEach((o, i) => {
+      const el = D.rows.get(o.n); if (!el) return;
+      const prev = D.rank.get(o.n), now = i + 1;
+      el.style.transform = 'translateY(' + (i * ROW) + 'px)'; el.firstChild.textContent = now;
+      el.classList.toggle('me', o.n === sel);
+      const dlt = D.base.get(o.n) - now, dl = el.querySelector('.dl');
+      dl.textContent = dlt > 0 ? '▲' + dlt : dlt < 0 ? '▼' + (-dlt) : ''; dl.style.color = dlt > 0 ? 'var(--green)' : 'var(--red)';
+      if (prev !== now) { el.classList.remove('up', 'dn'); void el.offsetWidth; el.classList.add(now < prev ? 'up' : 'dn'); }
+      D.rank.set(o.n, now);
+    });
+  }
+  function updateFeed() {
+    let n = 0; while (n < D.events.length && D.events[n].rel <= t) n++;
+    if (n === D.feedN) return; D.feedN = n;
+    const nm = x => { const d = dr.map.get(x); return d ? '<b style="color:' + d.color + '">' + esc(d.acr) + '</b>' : '#' + x; };
+    const rows = D.events.slice(Math.max(0, n - 5), n).reverse();
+    $('#feed').innerHTML = rows.length ? rows.map(e => '<div class="fi' + (e.a === sel || e.b === sel ? ' mine' : '') + '"><span class="num muted">' + fmtClock(e.rel) + '</span> ' + nm(e.a) + ' passed ' + nm(e.b) + (e.pos ? ' for P' + e.pos : '') + '</div>').join('') : '<span class="muted">No passes yet in this lap.</span>';
   }
   function interp(c, tt) {
     const n = c.t.length, i = G.bsearch(c.t, tt);
@@ -446,27 +635,33 @@ pages.onboard = async function () {
     T.t.forEach((v, i) => { sp += sx(v).toFixed(1) + ',' + ys(T.speed[i]).toFixed(1) + (i < T.t.length - 1 ? 'L' : ''); th += sx(v).toFixed(1) + ',' + yt(T.thr[i]).toFixed(1) + (i < T.t.length - 1 ? 'L' : ''); if (T.brk[i] > 0) br += '<rect x="' + sx(v).toFixed(1) + '" y="76" width="3" height="70" style="fill:var(--red);opacity:.28"/>'; });
     const marks = D.marks.map(m => '<line x1="' + sx(m) + '" x2="' + sx(m) + '" y1="0" y2="' + H + '" style="stroke:#ff9d00;stroke-width:2"/>').join('');
     host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H + '"><text x="2" y="12" style="fill:var(--muted);font:11px var(--mono)">Speed</text><text x="2" y="90" style="fill:var(--muted);font:11px var(--mono)">Throttle and brake</text>' + br + marks + '<path d="' + sp + '" fill="none" style="stroke:var(--blue)" stroke-width="2"/><path d="' + th + '" fill="none" style="stroke:var(--green)" stroke-width="2"/><line id="cur" y1="0" y2="' + H + '" style="stroke:var(--ink);stroke-width:1.5"/></svg>';
-    const seek = e => { const r = host.getBoundingClientRect(); t = Math.max(0, Math.min(D.dur, (e.clientX - r.left) / r.width * D.dur)); render(); };
+    const seek = e => { const r = host.getBoundingClientRect(); t = Math.max(0, Math.min(D.dur, (e.clientX - r.left) / r.width * D.dur)); render(null); };
     let drag = false;
     host.onpointerdown = e => { drag = true; host.setPointerCapture(e.pointerId); seek(e); };
     host.onpointermove = e => { if (drag) seek(e); };
     host.onpointerup = () => { drag = false; };
     D.traceW = W;
   }
-  function render() {
+  /* dt = real milliseconds since the last frame, or null to snap (seeking) */
+  function render(dt) {
     if (!D) return;
     for (const n of D.nodes) { const p = interp(n.c, t), q = D.P(p[0], p[1]); n.el.setAttribute('transform', 'translate(' + q[0].toFixed(1) + ',' + q[1].toFixed(1) + ')'); }
     const T = D.tel;
     if (T.t.length) {
       const i = Math.max(0, G.bsearch(T.t, t));
-      $('#vSpeed').textContent = T.speed[i]; $('#vGear').textContent = T.gear[i] || 'N';
-      const open = T.drs[i] >= 10; $('#vDrs').textContent = open ? 'Open' : 'Closed'; $('#vDrs').style.color = open ? 'var(--green)' : '';
-      $('#mThr').style.width = Math.min(100, T.thr[i]) + '%'; $('#mBrk').style.width = (T.brk[i] > 0 ? 100 : 0) + '%';
+      $('#vSpeed').textContent = Math.round(lerp(T.speed, T.t, t)); $('#vGear').textContent = T.gear[i] || 'N';
+      disp.thr = ease(disp.thr, Math.min(100, lerp(T.thr, T.t, t)), dt, 80);
+      disp.brk = ease(disp.brk, Math.min(100, lerp(T.brk, T.t, t)), dt, 70);
+      $('#mThr').style.width = disp.thr.toFixed(1) + '%'; $('#mBrk').style.width = disp.brk.toFixed(1) + '%';
+      const tgt = T.aero[i]; disp.aero = ease(disp.aero, tgt, dt, 160);
+      $('#flap').setAttribute('transform', 'rotate(' + (-26 * (1 - disp.aero)).toFixed(1) + ' 48 21)');
+      const x = tgt === 1; $('#vAero').textContent = x ? 'X-mode' : 'Z-mode'; $('#vAero').style.color = x ? 'var(--green)' : '';
     }
     const cur = $('#cur'); if (cur) { const x = t / D.dur * (D.traceW || 1); cur.setAttribute('x1', x); cur.setAttribute('x2', x); }
     $('#scrub').value = t; $('#clock').textContent = fmtClock(t) + ' / ' + fmtClock(D.dur);
+    updateOrder(); updateFeed();
   }
-  function tick(now) { const dt = now - last; last = now; t = Math.min(D.dur, t + dt * rate); render(); if (t >= D.dur) { stop(); return; } raf = requestAnimationFrame(tick); }
+  function tick(now) { const dt = Math.min(100, now - last); last = now; t = Math.min(D.dur, t + dt * rate); render(dt); if (t >= D.dur) { stop(); return; } raf = requestAnimationFrame(tick); }
   function play() { if (!D) return; if (t >= D.dur) t = 0; playing = true; last = performance.now(); raf = requestAnimationFrame(tick); $('#play').textContent = 'Pause'; }
   function stop() { playing = false; cancelAnimationFrame(raf); const b = $('#play'); if (b) b.textContent = 'Play'; }
 
@@ -481,8 +676,8 @@ pages.onboard = async function () {
   $('#bNext').onclick = () => goLap(lapNo + 1);
   $('#play').onclick = () => playing ? stop() : play();
   $('#rate').onchange = e => { rate = Number(e.target.value); };
-  $('#scrub').oninput = e => { t = Number(e.target.value); render(); };
-  if (window.ResizeObserver) { let w = 0; new ResizeObserver(() => { const x = $('#trace').clientWidth; if (D && x && x !== w) { w = x; drawTrace(); render(); } }).observe($('#trace')); }
+  $('#scrub').oninput = e => { t = Number(e.target.value); render(null); };
+  if (window.ResizeObserver) { let w = 0; new ResizeObserver(() => { const x = $('#trace').clientWidth; if (D && x && x !== w) { w = x; drawTrace(); render(null); } }).observe($('#trace')); }
 
   fillLaps(); drawVideos(); drawOvertakes(); load();
 };

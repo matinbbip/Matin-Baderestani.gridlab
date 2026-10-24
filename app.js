@@ -89,16 +89,19 @@ async function fetchJson(url) {
 }
 const mem = new Map();
 G.ttl = 14 * 864e5;
-G.api = async function (path, params, ttl) {
-  params = params || {}; ttl = ttl || G.ttl;
-  const qs = Object.entries(params).map(([k, v]) => /[<>]=?$/.test(k) ? k + encodeURIComponent(v) : k + '=' + encodeURIComponent(v)).join('&');
-  const url = BASE + '/' + path + (qs ? '?' + qs : '');
+G.cached = async function (url, ttl) {
+  ttl = ttl || G.ttl;
   if (mem.has(url)) return mem.get(url);
   const hit = await cget(url);
   if (hit && Date.now() - hit.t < ttl) { mem.set(url, hit.v); return hit.v; }
   const p = fetchJson(url).then(v => { cset(url, { t: Date.now(), v }); return v; });
   mem.set(url, p);
   try { const v = await p; mem.set(url, v); return v; } catch (e) { mem.delete(url); throw e; }
+};
+G.api = function (path, params, ttl) {
+  params = params || {};
+  const qs = Object.entries(params).map(([k, v]) => /[<>]=?$/.test(k) ? k + encodeURIComponent(v) : k + '=' + encodeURIComponent(v)).join('&');
+  return G.cached(BASE + '/' + path + (qs ? '?' + qs : ''), ttl);
 };
 
 /* ---------- race list ---------- */
@@ -137,7 +140,7 @@ G.loadRaces = async function () {
 };
 
 /* ---------- header / boot ---------- */
-const PAGES = [['index.html', 'Overview', 'overview'], ['timing.html', 'Timing', 'timing'], ['sectors.html', 'Mini-sectors', 'sectors'], ['strategy.html', 'Strategy', 'strategy'], ['onboard.html', 'Onboard', 'onboard']];
+const PAGES = [['index.html', 'Overview', 'overview'], ['calendar.html', 'Calendar', 'calendar'], ['sessions.html', 'Sessions', 'sessions'], ['timing.html', 'Timing', 'timing'], ['sectors.html', 'Mini-sectors', 'sectors'], ['strategy.html', 'Strategy', 'strategy'], ['onboard.html', 'Onboard', 'onboard']];
 G.loading = m => '<div class="loading"><span class="pulse"></span><p>' + esc(m) + '</p></div>';
 G.fail = function (e) {
   console.error(e);
@@ -147,12 +150,17 @@ G.fail = function (e) {
   a.innerHTML = '<div class="note err"><b>Could not load data</b><p>' + esc(m) + '</p><button class="btn" id="retry" type="button">Try again</button></div>';
   document.getElementById('retry').onclick = () => location.reload();
 };
-G.boot = async function (page) {
+G.boot = async function (page, opts) {
   const hdr = document.getElementById('hdr');
   const file = PAGES.find(p => p[2] === page)[0];
   hdr.innerHTML = '<div class="bar"><a class="brand" href="index.html"><span class="lights"><i></i><i></i><i></i><i></i><i></i></span>Matin Baderestani Gridlab</a><nav class="nav" aria-label="Sections">' +
     PAGES.map(p => '<a data-p="' + p[0] + '" href="' + p[0] + '"' + (p[2] === page ? ' class="on" aria-current="page"' : '') + '>' + p[1] + '</a>').join('') +
     '</nav></div><div class="races" id="races" aria-label="Choose a race"></div>';
+  if (opts && opts.light) {
+    const rb = document.getElementById('races'); if (rb) rb.style.display = 'none';
+    document.title = PAGES.find(p => p[2] === page)[1] + ' · Matin Baderestani Gridlab';
+    return { light: true };
+  }
   document.getElementById('app').innerHTML = G.loading('Finding the latest races…');
   let races;
   try { races = await G.loadRaces(); } catch (e) { G.fail(e); return null; }
