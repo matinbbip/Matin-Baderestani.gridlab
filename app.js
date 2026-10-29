@@ -64,28 +64,35 @@ async function cset(k, v) { try { const db = await getDb(); if (db) db.transacti
 
 /* ---------- throttled fetch ---------- */
 let chain = Promise.resolve(), lastCall = 0;
-function throttled(fn) {
+const stamps = [];
+function throttled(fn, limited) {
   const run = chain.then(async () => {
     const wait = Math.max(0, lastCall + 380 - Date.now());
     if (wait) await sleep(wait);
+    if (limited) {
+      const now = Date.now(); while (stamps.length && now - stamps[0] > 60000) stamps.shift();
+      if (stamps.length >= 28) await sleep(stamps[0] + 60000 - Date.now() + 50);
+      stamps.push(Date.now());
+    }
     try { return await fn(); } finally { lastCall = Date.now(); }
   });
   chain = run.catch(() => {});
   return run;
 }
 async function fetchJson(url) {
+  const isF1 = url.indexOf(BASE) === 0;
   for (let a = 0; a < 6; a++) {
-    const r = await throttled(() => fetch(url));
+    const r = await throttled(() => fetch(url), isF1);
     if (r.status === 429) { await sleep(1500 * (a + 1)); continue; }
     if (r.status === 404) return [];
     if (!r.ok) {
       let m = ''; try { const j = await r.json(); m = j.detail || j.message || ''; } catch (e) { /* ignore */ }
-      const err = new Error('OpenF1 answered ' + r.status + (m ? ': ' + (typeof m === 'string' ? m : JSON.stringify(m)) : ''));
-      err.status = r.status; throw err;
+      const err = new Error((isF1 ? 'OpenF1' : 'The data service') + ' answered ' + r.status + (m ? ': ' + (typeof m === 'string' ? m : JSON.stringify(m)) : ''));
+      err.status = r.status; err.live = isF1 && (r.status === 401 || r.status === 403); throw err;
     }
     return r.json();
   }
-  throw new Error('OpenF1 rate limit reached. Wait a minute and reload the page.');
+  throw new Error('Rate limit reached. Wait a minute and reload the page.');
 }
 const mem = new Map();
 G.ttl = 14 * 864e5;
@@ -94,7 +101,8 @@ G.cached = async function (url, ttl) {
   if (mem.has(url)) return mem.get(url);
   const hit = await cget(url);
   if (hit && Date.now() - hit.t < ttl) { mem.set(url, hit.v); return hit.v; }
-  const p = fetchJson(url).then(v => { cset(url, { t: Date.now(), v }); return v; });
+  /* if the service is down or locked, an old saved copy is better than nothing */
+  const p = fetchJson(url).then(v => { cset(url, { t: Date.now(), v }); return v; }, e => { if (hit) return hit.v; throw e; });
   mem.set(url, p);
   try { const v = await p; mem.set(url, v); return v; } catch (e) { mem.delete(url); throw e; }
 };
@@ -105,6 +113,18 @@ G.api = function (path, params, ttl) {
 };
 
 /* ---------- race list ---------- */
+const mkRace = (s, m, round) => {
+  const d = new Date(G.ts(s.date_start)), cur = new Date().getFullYear();
+  return {
+    key: s.session_key, meeting: s.meeting_key, year: s.year, round,
+    name: m.meeting_name || ((s.country_name || 'Race') + ' Grand Prix'),
+    country: s.country_name || m.country_name || '', location: s.location || m.location || '',
+    circuit: s.circuit_short_name || m.circuit_short_name || '',
+    date: d, dateLabel: d.toLocaleDateString('en-GB', Object.assign({ day: 'numeric', month: 'short' }, s.year !== cur ? { year: 'numeric' } : {})),
+    dateLong: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }),
+    recent: Date.now() - G.ts(s.date_end) < 864e5
+  };
+};
 G.loadRaces = async function () {
   const now = Date.now(), y = new Date().getFullYear();
   let sess = [];
@@ -122,58 +142,166 @@ G.loadRaces = async function () {
   [...new Set(sess.map(s => s.year))].forEach(yr => {
     sess.filter(s => s.year === yr).sort((a, b) => G.ts(a.date_start) - G.ts(b.date_start)).forEach((s, i) => roundOf.set(s.session_key, i + 1));
   });
+  /* a race weekend that has started but whose race has not finished yet (practice and qualifying are already available) */
+  G.weekend = null;
+  try {
+    const up = sess.filter(s => G.ts(s.date_end) >= now).sort((a, b) => G.ts(a.date_start) - G.ts(b.date_start))[0];
+    if (up && G.ts(up.date_start) - now < 4 * 864e5) {
+      const ws = await G.api('sessions', { meeting_key: up.meeting_key }, 3e5);
+      if (ws.some(x => G.ts(x.date_end) != null && G.ts(x.date_end) < now)) G.weekend = Object.assign(mkRace(up, meetings.get(up.meeting_key) || {}, roundOf.get(up.session_key)), { weekend: true });
+    }
+  } catch (e) { /* optional */ }
   return sess.filter(s => G.ts(s.date_end) != null && G.ts(s.date_end) < now)
     .sort((a, b) => G.ts(b.date_start) - G.ts(a.date_start)).slice(0, 5)
-    .map(s => {
-      const m = meetings.get(s.meeting_key) || {};
-      const d = new Date(G.ts(s.date_start));
-      return {
-        key: s.session_key, meeting: s.meeting_key, year: s.year, round: roundOf.get(s.session_key),
-        name: m.meeting_name || ((s.country_name || 'Race') + ' Grand Prix'),
-        country: s.country_name || m.country_name || '', location: s.location || m.location || '',
-        circuit: s.circuit_short_name || m.circuit_short_name || '',
-        date: d, dateLabel: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }),
-        dateLong: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }),
-        recent: now - G.ts(s.date_end) < 864e5
-      };
-    });
+    .map(s => mkRace(s, meetings.get(s.meeting_key) || {}, roundOf.get(s.session_key)));
+};
+/* any race by session key (used by the season archive) */
+G.raceFromKey = async function (key) {
+  const ss = await G.api('sessions', { session_key: key }, 36e5), s = ss[0]; if (!s) return null;
+  const ms = await G.api('meetings', { meeting_key: s.meeting_key }, 36e5);
+  let round; try {
+    const yr = await G.api('sessions', { year: s.year, session_name: 'Race' }, 36e5);
+    const idx = yr.slice().sort((x, y) => G.ts(x.date_start) - G.ts(y.date_start)).findIndex(x => x.session_key === s.session_key);
+    round = idx >= 0 ? idx + 1 : undefined;
+  } catch (e) { /* round is optional */ }
+  return mkRace(s, ms[0] || {}, round);
 };
 
 /* ---------- header / boot ---------- */
-const PAGES = [['index.html', 'Overview', 'overview'], ['calendar.html', 'Calendar', 'calendar'], ['sessions.html', 'Sessions', 'sessions'], ['timing.html', 'Timing', 'timing'], ['sectors.html', 'Mini-sectors', 'sectors'], ['strategy.html', 'Strategy', 'strategy'], ['onboard.html', 'Onboard', 'onboard']];
+const PAGES = [['overview.html', 'Overview', 'overview'], ['calendar.html', 'Calendar', 'calendar'], ['sessions.html', 'Sessions', 'sessions'], ['timing.html', 'Timing', 'timing'], ['sectors.html', 'Mini-sectors', 'sectors'], ['strategy.html', 'Strategy', 'strategy'], ['onboard.html', 'Onboard', 'onboard'], ['championship.html', 'Championship', 'championship'], ['archive.html', 'Archive', 'archive']];
 G.loading = m => '<div class="loading"><span class="pulse"></span><p>' + esc(m) + '</p></div>';
+const JOL = 'https://api.jolpi.ca/ergast/f1/';
+const histTtl = y => y >= new Date().getFullYear() ? 36e5 : 30 * 864e5;
+G.jol = async function (path, ttl) { const j = await G.cached(JOL + path, ttl || 36e5); return (j && j.MRData) || null; };
+/* OpenF1 switches its free access off from 30 min before a session until 30 min after it ends */
+G.lockInfo = async function () {
+  try {
+    const m = await G.jol(new Date().getFullYear() + '.json?limit=100', 36e5), now = Date.now();
+    const KEYS = [['FirstPractice', 60], ['SecondPractice', 60], ['ThirdPractice', 60], ['SprintQualifying', 50], ['SprintShootout', 50], ['Sprint', 40], ['Qualifying', 60]];
+    let best = null;
+    for (const r of (m && m.RaceTable && m.RaceTable.Races) || []) {
+      for (const it of KEYS.map(k => [r[k[0]], k[1]]).concat([[r, 120]])) {
+        const o = it[0]; if (!o || !o.date) continue;
+        let t = o.time || '00:00:00Z'; if (!/Z|[+-]\d\d:?\d\d$/.test(t)) t += 'Z';
+        const s = Date.parse(o.date + 'T' + t); if (isNaN(s)) continue;
+        const a = s - 30 * 60e3, b = s + it[1] * 60e3 + 30 * 60e3;
+        if (now >= a && now <= b && (!best || b > best.end)) best = { start: s, end: b };
+      }
+    }
+    return best;
+  } catch (e) { return null; }
+};
 G.fail = function (e) {
   console.error(e);
-  let m = (e && e.message) || String(e);
-  if (/Failed to fetch|NetworkError|Load failed/i.test(m)) m = 'The browser could not reach api.openf1.org. Check your connection. OpenF1 can also be unavailable while a live session is running.';
-  const a = document.getElementById('app');
-  a.innerHTML = '<div class="note err"><b>Could not load data</b><p>' + esc(m) + '</p><button class="btn" id="retry" type="button">Try again</button></div>';
+  const m = (e && e.message) || String(e), net = /Failed to fetch|NetworkError|Load failed/i.test(m), a = document.getElementById('app');
+  const maybeLock = (e && e.live) || net;
+  a.innerHTML = '<div class="note err"><b id="errh">' + (maybeLock ? 'No data from OpenF1 right now' : 'Could not load data') + '</b><p id="errp">' +
+    esc(maybeLock ? 'The browser could not get data from api.openf1.org. The most common reason on a race weekend is that OpenF1 pauses its free service, past races included, from 30 minutes before a session starts until 30 minutes after it ends.' : m) +
+    '</p><div class="links" id="errl"><button class="btn" id="retry" type="button">Try again</button><a class="lk" href="calendar.html">Calendar</a><a class="lk" href="archive.html">Season archive</a></div></div>';
   document.getElementById('retry').onclick = () => location.reload();
+  if (maybeLock) {
+    G.lockInfo().then(li => {
+      const p = document.getElementById('errp'); if (!p) return;
+      if (li) p.textContent = 'A live session is on right now, so OpenF1 has paused its free service. Past races come back around ' + new Date(li.end).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + ' your time. Until then, the links below still work, and races you opened before are saved in your browser.';
+      else p.textContent = 'No live session is scheduled right now, so this may be a connection problem or OpenF1 being busy. Check your connection and try again in a minute.';
+    });
+  }
+  G.jol('current/last/results.json?limit=100', 36e5).then(mm => {
+    const r = mm && mm.RaceTable && mm.RaceTable.Races && mm.RaceTable.Races[0], l = document.getElementById('errl');
+    if (r && l) l.insertAdjacentHTML('beforeend', '<a class="lk main" href="classic.html?y=' + r.season + '&r=' + r.round + '">Latest results: ' + esc(r.raceName) + '</a>');
+  }).catch(() => {});
 };
+
+/* ---------- season + Grand Prix picker and full-season race bar in the header ---------- */
+G.picker = async function (o) {
+  const host = document.getElementById('races'); if (!host) return;
+  host.style.display = '';
+  const nowY = new Date().getFullYear(), years = []; for (let y = nowY; y >= 2020; y--) years.push(y);
+  let items = [], tok = 0, year = o.year || nowY;
+  host.innerHTML = '<div class="pickrow"><label class="pick"><span>Season</span><select id="pkY" aria-label="Season">' + years.map(y => '<option value="' + y + '"' + (y === year ? ' selected' : '') + '>' + y + '</option>').join('') + '</select></label>' +
+    '<label class="pick"><span>Grand Prix</span><select id="pkG" aria-label="Grand Prix"><option>Loading…</option></select></label></div><div class="chiprow" id="chiprow" aria-label="All races of the season"></div>';
+  const selY = host.querySelector('#pkY'), selG = host.querySelector('#pkG'), row = host.querySelector('#chiprow');
+  const urlFor = (it, yy) => it.key && (o.mode === 'openf1' || it.weekend) ? (it.weekend ? 'sessions.html' : (o.file || 'overview.html')) + '?s=' + it.key : 'classic.html?y=' + yy + '&r=' + it.round;
+  async function fill(y, pre) {
+    const t = ++tok; selG.innerHTML = '<option>Loading…</option>'; selG.disabled = true; row.innerHTML = '<span class="muted" style="font-size:12.5px;align-self:center">Loading races…</span>';
+    let list = [];
+    try {
+      const m = await G.jol(y + '.json?limit=100', histTtl(y));
+      list = ((m && m.RaceTable && m.RaceTable.Races) || []).map(r => {
+        const st = Date.parse(r.date + 'T' + (r.time || '12:00:00Z'));
+        return { round: Number(r.round), name: r.raceName, short: String(r.raceName || '').replace(/ Grand Prix$/, ''), date: r.date, done: st + 2.5 * 36e5 < Date.now(), key: null };
+      });
+    } catch (e) { /* OpenF1 below */ }
+    if (y >= 2023) {
+      try {
+        const ss = await G.api('sessions', { year: y, session_name: 'Race' }, 36e5);
+        if (list.length) list.forEach(it => { const s = ss.find(x => Math.abs(Date.parse(String(x.date_start).slice(0, 10)) - Date.parse(it.date)) <= 864e5); if (s) it.key = s.session_key; });
+        else {
+          const ms = await G.api('meetings', { year: y }, 36e5), mm = new Map(ms.map(x => [x.meeting_key, x]));
+          list = ss.sort((p, q) => G.ts(p.date_start) - G.ts(q.date_start)).map((s, i) => { const nm = (mm.get(s.meeting_key) || {}).meeting_name || s.country_name; return { round: i + 1, name: nm, short: String(nm).replace(/ Grand Prix$/, ''), date: String(s.date_start).slice(0, 10), done: G.ts(s.date_end) < Date.now(), key: s.session_key }; });
+        }
+      } catch (e) { /* classic links only */ }
+    }
+    if (G.weekend && y === nowY) {
+      const w = list.find(it => it.key === G.weekend.key);
+      if (w) w.weekend = true;
+      else list.push({ round: G.weekend.round || list.length + 1, name: G.weekend.name, short: G.weekend.name.replace(/ Grand Prix$/, ''), date: String(G.weekend.date.toISOString()).slice(0, 10), done: false, key: G.weekend.key, weekend: true });
+    }
+    if (t !== tok) return;
+    items = list;
+    const cur = it => pre && (o.mode === 'openf1' ? it.key === o.key : it.round === o.round);
+    const open = items.map((it, i) => ({ it, i })).filter(x => x.it.done || x.it.weekend);
+    const at = open.findIndex(x => cur(x.it));
+    selG.innerHTML = (at < 0 ? '<option value="" disabled selected>' + (open.length ? 'Choose a race' : 'No races yet') + '</option>' : '') +
+      open.map((x, k) => '<option value="' + x.i + '"' + (k === at ? ' selected' : '') + '>R' + x.it.round + ' · ' + esc(x.it.name) + (x.it.weekend ? ' (this weekend)' : '') + '</option>').join('');
+    selG.disabled = !open.length;
+    row.innerHTML = items.length ? items.map(it => {
+      const d = new Date(it.date + 'T12:00:00Z'), sub = it.weekend ? 'This weekend' : 'R' + it.round + ' · ' + d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+      const live = it.done || it.weekend;
+      return live ? '<a class="race' + (cur(it) ? ' on' : '') + (it.weekend ? ' wk' : '') + '" href="' + urlFor(it, y) + '"><b>' + esc(it.short) + '</b><span>' + sub + '</span></a>'
+        : '<span class="race off" title="Not raced yet"><b>' + esc(it.short) + '</b><span>' + sub + '</span></span>';
+    }).join('') : '<span class="muted" style="font-size:12.5px;align-self:center">No races found for ' + y + '.</span>';
+    const on = row.querySelector('.race.on'); row.scrollLeft = on ? Math.max(0, on.offsetLeft - row.clientWidth / 2 + on.offsetWidth / 2) : 0;
+  }
+  selY.onchange = () => { year = Number(selY.value); fill(year, false); };
+  selG.onchange = () => { const it = items[Number(selG.value)]; if (it) location.href = urlFor(it, selY.value); };
+  row.addEventListener('wheel', e => { if (row.scrollWidth > row.clientWidth && Math.abs(e.deltaY) > Math.abs(e.deltaX)) { row.scrollLeft += e.deltaY; e.preventDefault(); } }, { passive: false });
+  fill(year, true);
+};
+
 G.boot = async function (page, opts) {
   const hdr = document.getElementById('hdr');
-  const file = PAGES.find(p => p[2] === page)[0];
+  const entry = PAGES.find(p => p[2] === page) || PAGES[0];
   hdr.innerHTML = '<div class="bar"><a class="brand" href="index.html"><span class="lights"><i></i><i></i><i></i><i></i><i></i></span>Matin Baderestani Gridlab</a><nav class="nav" aria-label="Sections">' +
     PAGES.map(p => '<a data-p="' + p[0] + '" href="' + p[0] + '"' + (p[2] === page ? ' class="on" aria-current="page"' : '') + '>' + p[1] + '</a>').join('') +
     '</nav></div><div class="races" id="races" aria-label="Choose a race"></div>';
   if (opts && opts.light) {
-    const rb = document.getElementById('races'); if (rb) rb.style.display = 'none';
-    document.title = PAGES.find(p => p[2] === page)[1] + ' · Matin Baderestani Gridlab';
+    const rb = document.getElementById('races');
+    if (opts.classic) G.picker({ mode: 'classic', year: opts.classic.year, round: opts.classic.round }); else if (rb) rb.style.display = 'none';
+    document.title = entry[1] + ' · Matin Baderestani Gridlab';
     return { light: true };
   }
   document.getElementById('app').innerHTML = G.loading('Finding the latest races…');
   let races;
-  try { races = await G.loadRaces(); } catch (e) { G.fail(e); return null; }
+  try { races = await G.loadRaces(); } catch (e) { G.picker({ mode: 'classic' }); G.fail(e); return null; }
   if (!races.length) { G.fail(new Error('No finished races were found in the OpenF1 archive yet.')); return null; }
   const q = new URLSearchParams(location.search).get('s');
   let saved = null; try { saved = localStorage.getItem('gridlab-race'); } catch (e) { /* ignore */ }
-  const sel = races.find(r => String(r.key) === q) || races.find(r => String(r.key) === saved) || races[0];
+  let sel = races.find(r => String(r.key) === q), chips = races;
+  if (!sel && G.weekend && String(G.weekend.key) === q) sel = G.weekend;
+  if (!sel && q) {
+    try { const ex = await G.raceFromKey(q); if (ex) { sel = ex; chips = [ex].concat(races); } } catch (e) { /* fall back to the latest race */ }
+  }
+  if (!sel) sel = races.find(r => String(r.key) === saved) || races[0];
   try { localStorage.setItem('gridlab-race', sel.key); } catch (e) { /* ignore */ }
   G.race = sel; G.races = races; G.ttl = sel.recent ? 10 * 60e3 : 14 * 864e5;
-  document.getElementById('races').innerHTML = races.map(r =>
-    '<a class="race' + (r.key === sel.key ? ' on' : '') + '" href="' + file + '?s=' + r.key + '"><b>' + esc(r.country || r.name) + '</b><span>R' + (r.round || '') + ' · ' + r.dateLabel + '</span></a>').join('');
+  G.picker({ mode: 'openf1', file: entry[0], year: sel.year, key: sel.key });
   G.$$('.nav a', hdr).forEach(a => { a.href = a.dataset.p + '?s=' + sel.key; });
-  document.title = PAGES.find(p => p[2] === page)[1] + ' · ' + sel.name + ' ' + sel.year + ' · Matin Baderestani Gridlab';
+  document.title = entry[1] + ' · ' + sel.name + ' ' + sel.year + ' · Matin Baderestani Gridlab';
+  if (sel.weekend && page !== 'sessions') {
+    document.getElementById('app').innerHTML = '<h1>' + esc(sel.name) + '</h1><p class="lede">The race has not been run yet, so there are no race laps, tyre stints or overtakes to analyse. Practice and qualifying results are ready.</p><p style="margin-top:20px"><a class="btn big" href="sessions.html?s=' + sel.key + '">Open practice and qualifying</a></p>';
+    return null;
+  }
   return sel;
 };
 
@@ -296,4 +424,27 @@ G.lineChart = function (host, cfg) {
   }
   return { update(c) { cfg = c; draw(); } };
 };
+
+/* ---------- visitor counter (free Abacus service, abacus.jasoncameron.dev). Every page load is one view. ---------- */
+G.views = async function () {
+  const f = document.querySelector('footer'); if (!f) return;
+  const base = 'https://abacus.jasoncameron.dev/', ns = 'matin-baderestani-gridlab', d = new Date(), iso = d.toISOString(), day = iso.slice(0, 10), mon = iso.slice(0, 7);
+  const call = async (key, act) => {
+    try { const r = await fetch(base + (act === 'up' ? 'hit' : 'get') + '/' + ns + '/' + key); if (!r.ok) return null; const j = await r.json(); const v = j && (j.value != null ? j.value : j.count); return typeof v === 'number' ? v : null; }
+    catch (e) { return null; }
+  };
+  const out = await Promise.all([call('site-views', 'up'), call('month-' + mon, 'up'), call('day-' + day, 'up')]);
+  if (out[0] == null && out[1] == null && out[2] == null) return;
+  const fmt = v => v == null ? '–' : v.toLocaleString('en-US'), monthName = (y, m) => new Date(Date.UTC(y, m, 1)).toLocaleDateString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+  f.insertAdjacentHTML('beforeend', '<div class="views"><span>Views today <b class="num">' + fmt(out[2]) + '</b></span><span>' + monthName(d.getUTCFullYear(), d.getUTCMonth()) + ' <b class="num">' + fmt(out[1]) + '</b></span><span>All time <b class="num">' + fmt(out[0]) + '</b></span></div>' +
+    '<details class="vm"><summary>Views by month</summary><div class="vml" id="vml">Loading…</div></details>');
+  const det = f.querySelector('.vm'); let loaded = false;
+  det.addEventListener('toggle', async () => {
+    if (!det.open || loaded) return; loaded = true;
+    const rows = [];
+    for (let k = 0; k < 6; k++) { const dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - k, 1)); const key = dt.toISOString().slice(0, 7); rows.push([monthName(dt.getUTCFullYear(), dt.getUTCMonth()), k === 0 ? out[1] : await call('month-' + key, 'get')]); }
+    f.querySelector('#vml').innerHTML = rows.map(r => '<div><span>' + r[0] + '</span><b class="num">' + fmt(r[1] == null ? 0 : r[1]) + '</b></div>').join('');
+  });
+};
+G.views();
 })();

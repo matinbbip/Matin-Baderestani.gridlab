@@ -1,19 +1,62 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta name="google-site-verification" content="Otd-ssJFzaZp3dsgfetBJoJmQ9_VcSWWd9amcEt1jQ4" />
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Overview · Matin Baderestani Gridlab</title>
-<meta name="description" content="Free F1 race analysis: timing, mini-sectors, tyre strategy and onboard telemetry replays for the last five races.">
+<meta name="google-site-verification" content="Otd-ssJFzaZp3dsgfetBJoJmQ9_VcSWWd9amcEt1jQ4" />
+<title>Matin Baderestani Gridlab · Formula 1 race analysis</title>
+<meta name="description" content="Free Formula 1 race analysis since 2020: timing, mini-sectors, tyre strategy and onboard telemetry replays. By Matin Baderestani.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%81%3C/text%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
-<body data-page="overview">
+<body data-page="home">
 <header class="site" id="hdr"></header>
-<main class="page" id="app"><noscript>This site needs JavaScript to load race data.</noscript></main>
-<footer>Data from the free <a href="https://openf1.org" target="_blank" rel="noopener">OpenF1</a> API. Unofficial project, not affiliated with Formula 1 or the FIA. Video links open the official Formula 1 YouTube channel.</footer>
+<main class="page" id="app">
+
+  <section class="welcome" aria-labelledby="welcome">
+    <div>
+      <p class="by">Matin Baderestani</p>
+      <h1 id="welcome">Welcome to <em>Gridlab</em></h1>
+      <p class="lede">Every Grand Prix since 2020, taken apart lap by lap. Timing, mini-sectors, tyre strategy and onboard replays, free and in your browser.</p>
+      <a class="btn big" href="overview.html">Let’s go explore</a>
+    </div>
+    <div class="gcard" aria-hidden="true">
+      <div class="col"><i></i><i></i></div><div class="col"><i></i><i></i></div><div class="col"><i></i><i></i></div><div class="col"><i></i><i></i></div><div class="col"><i></i><i></i></div>
+    </div>
+  </section>
+
+  <section class="block">
+    <h2>Where to start</h2>
+    <p>Pick a season and a Grand Prix from the bar at the top of any page. Then jump between these sections.</p>
+    <div class="stats menu">
+      <a class="stat" href="overview.html"><b>Overview</b><div class="s">Results, fastest lap, top speed, fastest pit stop and most overtakes.</div></a>
+      <a class="stat" href="calendar.html"><b>Calendar</b><div class="s">Live countdown to the next practice, qualifying and race.</div></a>
+      <a class="stat" href="sessions.html"><b>Sessions</b><div class="s">Practice and qualifying tables with tyres, best laps and top speeds.</div></a>
+      <a class="stat" href="timing.html"><b>Timing</b><div class="s">Best laps, sector bests, ideal lap, lap time and position charts.</div></a>
+      <a class="stat" href="sectors.html"><b>Mini-sectors</b><div class="s">Purple, green and yellow mini-sectors, driver against driver.</div></a>
+      <a class="stat" href="strategy.html"><b>Strategy</b><div class="s">Tyre stints, pace by tyre age and pit stops.</div></a>
+      <a class="stat" href="onboard.html"><b>Onboard</b><div class="s">Replay any lap on the map with telemetry, running order and overtakes.</div></a>
+      <a class="stat" href="championship.html"><b>Championship</b><div class="s">Driver and constructor standings for every season since 2020, with fireworks for the champion.</div></a>
+      <a class="stat" href="archive.html"><b>Archive</b><div class="s">Browse every race from 2020 to <span id="yr">now</span>.</div></a>
+    </div>
+  </section>
+
+  <section class="about" aria-labelledby="about-h">
+    <div>
+      <h2 id="about-h">About me</h2>
+      <p>I’m Matin Baderestani. Gridlab is my own Formula 1 project. I wanted to look at a race the way a team analyst does: who was quick in which sector, who won on strategy, and exactly where a pass happened.</p>
+      <p>I build and improve it in my own time and keep adding the things I want to see myself. If something looks wrong or you have an idea, I’d like to hear it.</p>
+    </div>
+    <div>
+      <h2>About the site</h2>
+      <p>Gridlab turns free public data into race analysis you can explore. From 2023 it uses the <a href="https://openf1.org" target="_blank" rel="noopener">OpenF1</a> API for lap times, sectors, mini-sectors, tyre stints, pit stops, overtakes and car telemetry. For 2020 to 2022 it uses the <a href="https://api.jolpi.ca" target="_blank" rel="noopener">Jolpica</a> archive for results, qualifying, lap charts and pit stops.</p>
+      <p>It runs entirely in your browser, has no accounts and no ads, and is hosted free on GitHub Pages. It is an unofficial fan project and is not affiliated with Formula 1 or the FIA.</p>
+    </div>
+  </section>
+
+</main>
+<footer>Data from <a href="https://openf1.org" target="_blank" rel="noopener">OpenF1</a> and <a href="https://api.jolpi.ca" target="_blank" rel="noopener">Jolpica</a>. Unofficial project, not affiliated with Formula 1 or the FIA. Video links open the official Formula 1 YouTube channel.</footer>
 <script src="app.js"></script>
 <script src="pages.js"></script>
 </body>

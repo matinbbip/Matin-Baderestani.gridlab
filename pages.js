@@ -42,18 +42,19 @@ pages.overview = async function () {
   cards.push('<div class="stat"><small>Most overtakes</small><div class="v">' + (topOt ? topOt[1] : '–') + '</div><div class="s">' +
     (topOt && D(topOt[0]) ? '<b>' + esc(D(topOt[0]).name) + '</b>' + '<div class="links"><a class="lk" href="onboard.html?s=' + race.key + '&d=' + topOt[0] + '&lap=1">See the passes</a></div>' : 'No overtake data published') + '</div></div>');
 
+  let prevGap = null;
   const rows = res.map(r => {
     const d = D(r.num); if (!d) return '';
     let t = '–';
-    if (r.pos === 1 && r.time != null) t = G.raceTime(r.time);
-    else if (typeof r.gap === 'number') t = '+' + r.gap.toFixed(3);
-    else if (r.gap) t = esc(r.gap);
+    if (r.pos === 1) { t = r.time != null ? G.raceTime(r.time) : '–'; prevGap = 0; }
+    else if (typeof r.gap === 'number') { t = '+' + (prevGap != null ? r.gap - prevGap : r.gap).toFixed(3); prevGap = r.gap; }
+    else if (r.gap) { t = esc(r.gap); prevGap = null; }
     if (r.status) t = r.status;
     return '<tr><td class="n"><span class="pos">' + (r.pos == null ? '–' : r.pos) + '</span></td><td>' + G.dcell(d) + (fl && fl.driver_number === r.num ? '<span class="pill" title="Fastest lap">FL</span>' : '') + '</td><td class="muted">' + esc(d.team_name || '') + '</td><td class="n r">' + (r.laps == null ? '–' : r.laps) + '</td><td class="n r">' + t + '</td><td class="r"><a class="lk" href="' + ob(r.num, 1) + '">Onboard</a></td></tr>';
   }).join('');
 
   app.innerHTML = head(race) + '<div class="stats">' + cards.join('') + '</div>' +
-    '<section class="block"><h2>Final classification</h2><p>Official order from the OpenF1 session result.</p><div class="scroll"><table class="tbl"><thead><tr><th>Pos</th><th>Driver</th><th>Team</th><th class="r">Laps</th><th class="r">Time / gap</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div></section>' +
+    '<section class="block"><h2>Final classification</h2><p>Official order from the OpenF1 session result, with the gap to the car ahead.</p><div class="scroll"><table class="tbl"><thead><tr><th>Pos</th><th>Driver</th><th>Team</th><th class="r">Laps</th><th class="r">Gap to car ahead</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div><p class="note">The winner shows race time. Everyone else shows the gap to the car directly ahead. Lapped cars show laps down on the leader.</p></section>' +
     '<section class="block"><h2>Dig into the race</h2><p>Each analysis has its own page.</p><div class="stats">' +
     [['timing.html', 'Timing', 'Best laps, sector bests, ideal lap, speed trap, lap time and position charts.'],
      ['sectors.html', 'Mini-sectors', 'Purple, green and yellow mini-sectors for any lap, compared driver against driver.'],
@@ -680,6 +681,241 @@ pages.onboard = async function () {
   if (window.ResizeObserver) { let w = 0; new ResizeObserver(() => { const x = $('#trace').clientWidth; if (D && x && x !== w) { w = x; drawTrace(); render(null); } }).observe($('#trace')); }
 
   fillLaps(); drawVideos(); drawOvertakes(); load();
+};
+
+/* =========================================================
+   HOME (landing page, static content in index.html)
+   ========================================================= */
+pages.home = async function () {
+  await G.boot('home', { light: true });
+  document.title = 'Matin Baderestani Gridlab · Formula 1 race analysis';
+  const cols = $$('.gcard .col'), yr = $('#yr'); if (yr) yr.textContent = new Date().getFullYear();
+  const set = n => cols.forEach((c, i) => c.classList.toggle('on', i < n));
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) { set(5); return; }
+  (function cycle() {
+    set(0); let n = 0;
+    const step = () => { n++; set(n); if (n < 5) setTimeout(step, 650); else setTimeout(() => { set(0); setTimeout(cycle, 3400); }, 1500); };
+    setTimeout(step, 900);
+  })();
+};
+
+/* =========================================================
+   ARCHIVE (every Grand Prix since 2020)
+   ========================================================= */
+const JOL = 'https://api.jolpi.ca/ergast/f1/';
+const TEAM_COL = { mercedes: '#27F4D2', ferrari: '#E8002D', red_bull: '#3671C6', mclaren: '#FF8000', alpine: '#2293D1', renault: '#FFD800', aston_martin: '#229971', racing_point: '#F596C8', alphatauri: '#5E8FAA', rb: '#6692FF', haas: '#B6BABD', williams: '#64C4FF', alfa: '#C92D4B', sauber: '#52E252', audi: '#F50537', cadillac: '#C0C0C8', toro_rosso: '#469BFF' };
+const teamCol = id => TEAM_COL[id] || '#8d9ba9';
+const jol = async (path, ttl) => { const j = await G.cached(JOL + path, ttl || 36e5); return (j && j.MRData) || null; };
+const fixedTtl = y => y >= new Date().getFullYear() ? 36e5 : 30 * 864e5;
+
+pages.archive = async function () {
+  await G.boot('archive', { light: true });
+  const app = $('#app'), nowY = new Date().getFullYear(), qp = new URLSearchParams(location.search);
+  let year = Number(qp.get('y')) || nowY; if (year < 2020 || year > nowY) year = nowY;
+  const years = []; for (let y = nowY; y >= 2020; y--) years.push(y);
+  app.innerHTML = '<h1>Season archive</h1><p class="lede">Every Grand Prix since 2020. Pick a season, then a race. From 2023 the full analysis pages open, with telemetry and mini-sectors. For 2020 to 2022 you get results, qualifying, lap charts and pit stops.</p>' +
+    '<div class="stabs" id="years" role="tablist"></div><div class="controls" style="margin-bottom:14px"><label>Find a Grand Prix<input id="q" class="sel" type="search" placeholder="Singapore, Monza, Spa…" autocomplete="off"></label></div><div class="gplist" id="glist"></div>';
+  let tok = 0, cards = [];
+  function drawYears() {
+    $('#years').innerHTML = years.map(y => '<button type="button" class="stab" role="tab" aria-selected="' + (y === year) + '" data-y="' + y + '"><b>' + y + '</b><span>' + (y >= 2023 ? 'Full data' : 'Results') + '</span></button>').join('');
+    $$('#years .stab').forEach(b => b.onclick = () => { year = Number(b.dataset.y); history.replaceState(null, '', '?y=' + year); drawYears(); load(); });
+  }
+  async function load() {
+    const t = ++tok, box = $('#glist'); box.innerHTML = G.loading('Loading ' + year + '…');
+    let races = [], link = new Map();
+    try { const m = await jol(year + '/results/1.json?limit=100', fixedTtl(year)); races = (m && m.RaceTable && m.RaceTable.Races) || []; } catch (e) { if (t === tok) box.innerHTML = '<div class="note err"><b>Could not load ' + year + '</b><p>' + esc(e.message) + '</p></div>'; return; }
+    if (year >= 2023) { try { (await G.api('sessions', { year, session_name: 'Race' }, 36e5)).forEach(s => link.set(String(s.date_start).slice(0, 10), s.session_key)); } catch (e) { /* classic links only */ } }
+    if (t !== tok) return;
+    if (!races.length) { box.innerHTML = '<p class="note">No finished races for ' + year + ' yet.</p>'; return; }
+    cards = races.map(r => {
+      const w = (r.Results && r.Results[0]) || null, loc = (r.Circuit && r.Circuit.Location) || {};
+      const near = [...link.keys()].find(k => Math.abs(Date.parse(k) - Date.parse(r.date)) <= 864e5), key = near ? link.get(near) : null;
+      const d = new Date(r.date + 'T12:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+      return { text: (r.raceName + ' ' + (loc.locality || '') + ' ' + (loc.country || '')).toLowerCase(), html:
+        '<article class="gp"><div class="gph"><span class="rd num">R' + r.round + '</span><span class="muted">' + d + '</span></div><h3>' + esc(r.raceName) + '</h3><p class="muted">' + esc(loc.locality || '') + (loc.country ? ', ' + esc(loc.country) : '') + '</p>' +
+        (w ? '<p class="win"><span class="tc" style="--tc:' + teamCol(w.Constructor.constructorId) + '"></span>' + esc(w.Driver.givenName + ' ' + w.Driver.familyName) + '<span class="muted"> · ' + esc(w.Constructor.name) + '</span></p>' : '') +
+        '<div class="links">' + (key ? '<a class="lk main" href="overview.html?s=' + key + '">Open full analysis</a>' : '') + '<a class="lk" href="classic.html?y=' + year + '&r=' + r.round + '">Results and laps</a></div></article>' };
+    });
+    paint();
+  }
+  function paint() {
+    const q = $('#q').value.trim().toLowerCase(), f = cards.filter(c => !q || c.text.includes(q));
+    $('#glist').innerHTML = f.length ? f.map(c => c.html).join('') : '<p class="note">No Grand Prix matches that search.</p>';
+  }
+  $('#q').oninput = paint;
+  drawYears(); load();
+};
+
+/* =========================================================
+   CLASSIC RACE PAGE (any season, Jolpica data)
+   ========================================================= */
+pages.classic = async function () {
+  const qp = new URLSearchParams(location.search), y = Number(qp.get('y')), rd = Number(qp.get('r'));
+  await G.boot('archive', { light: true, classic: { year: y || undefined, round: rd } });
+  const app = $('#app');
+  if (!y || !rd) { app.innerHTML = '<p class="note">Pick a race in the <a href="archive.html"><u>season archive</u></a>.</p>'; return; }
+  const base = y + '/' + rd, ttl = fixedTtl(y);
+  let race;
+  try { const m = await jol(base + '/results.json?limit=100', ttl); race = m && m.RaceTable && m.RaceTable.Races[0]; } catch (e) { return G.fail(e); }
+  if (!race) { app.innerHTML = '<p class="note">That race was not found. <a href="archive.html"><u>Back to the archive</u></a></p>'; return; }
+  document.title = race.raceName + ' ' + y + ' · Matin Baderestani Gridlab';
+  const loc = (race.Circuit && race.Circuit.Location) || {}, results = race.Results || [];
+  const drv = new Map(results.map(r => [r.Driver.driverId, { id: r.Driver.driverId, acr: r.Driver.code || r.Driver.familyName.slice(0, 3).toUpperCase(), name: r.Driver.givenName + ' ' + r.Driver.familyName, team: r.Constructor.name, color: teamCol(r.Constructor.constructorId), driver_number: r.Driver.driverId }]));
+  const dc = d => '<span class="tc" style="--tc:' + d.color + '"></span><b class="acr" style="color:' + d.color + '">' + esc(d.acr) + '</b> <span class="muted">' + esc(d.name) + '</span>';
+  const secs = t => { if (!t) return null; const m = /^(?:(\d+):)?(\d+(?:\.\d+)?)$/.exec(String(t).trim()); return m ? (m[1] ? Number(m[1]) * 60 : 0) + Number(m[2]) : null; };
+  app.innerHTML = '<h1>' + esc(race.raceName) + ' ' + y + '</h1><p class="lede">' + esc((race.Circuit && race.Circuit.circuitName) || '') + ', ' + esc(loc.locality || '') + ' · ' + new Date(race.date + 'T12:00:00Z').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) + '</p>' +
+    '<div class="links" id="fullLink"></div>' + (y < 2023 ? '<p class="note" style="padding-bottom:0">Timing, mini-sector and onboard pages need OpenF1 telemetry, which only exists from 2023. This season has results, qualifying, lap charts and pit stops.</p>' : '') + '<div class="stabs" id="ctabs" role="tablist"></div><div id="cbody"></div>';
+  if (y >= 2023) { (async () => { try { const ss = await G.api('sessions', { year: y, session_name: 'Race' }, 36e5), s = ss.find(x => Math.abs(Date.parse(String(x.date_start).slice(0, 10)) - Date.parse(race.date)) <= 864e5); if (s) $('#fullLink').innerHTML = '<a class="lk main" href="overview.html?s=' + s.session_key + '">Open the full analysis for this race</a>'; } catch (e) { /* optional */ } })(); }
+
+  const TABS = [['results', 'Results'], ['quali', 'Qualifying'], ['laps', 'Lap charts'], ['pits', 'Pit stops']];
+  let tab = TABS.some(t => t[0] === qp.get('t')) ? qp.get('t') : 'results', tok = 0; const cache = {};
+  function drawTabs() { $('#ctabs').innerHTML = TABS.map(t => '<button type="button" class="stab" role="tab" aria-selected="' + (t[0] === tab) + '" data-t="' + t[0] + '"><b>' + t[1] + '</b></button>').join(''); $$('#ctabs .stab').forEach(b => b.onclick = () => { tab = b.dataset.t; drawTabs(); show(); }); }
+  async function show() {
+    const t = ++tok, box = $('#cbody'); box.innerHTML = G.loading('Loading…');
+    try { const html = await VIEW[tab](); if (t !== tok) return; if (html != null) box.innerHTML = html; if (t === tok && AFTER[tab]) AFTER[tab](); }
+    catch (e) { if (t === tok) box.innerHTML = '<div class="note err"><b>Could not load this section</b><p>' + esc(e.message) + '</p></div>'; }
+  }
+  const VIEW = {
+    async results() {
+      const fl = results.find(r => r.FastestLap && r.FastestLap.rank === '1');
+      let prev = null;
+      const gapTxt = r => {
+        if (r.position === '1') { prev = 0; return r.Time ? r.Time.time : r.status; }
+        if (r.Time && /^\+/.test(r.Time.time)) { const g = secs(r.Time.time.slice(1)); if (g != null && prev != null) { const v = '+' + (g - prev).toFixed(3); prev = g; return v; } prev = g; return r.Time.time; }
+        prev = null; return r.status;
+      };
+      return '<div class="scroll"><table class="tbl"><thead><tr><th>Pos</th><th>Driver</th><th>Team</th><th class="r">Grid</th><th class="r">Laps</th><th class="r">Gap to car ahead</th><th class="r">Fastest lap</th><th class="r">Pts</th></tr></thead><tbody>' +
+        results.map(r => { const d = drv.get(r.Driver.driverId), f = r.FastestLap; return '<tr><td class="n"><span class="pos">' + esc(r.positionText || r.position) + '</span></td><td>' + dc(d) + '</td><td class="muted">' + esc(r.Constructor.name) + '</td><td class="n r">' + (r.grid === '0' ? 'Pit' : esc(r.grid)) + '</td><td class="n r">' + esc(r.laps) + '</td><td class="n r">' + esc(gapTxt(r)) + '</td><td class="n r ' + (f && f.rank === '1' ? 'pp' : '') + '">' + (f ? esc(f.Time.time) + ' <span class="muted">L' + esc(f.lap) + '</span>' : '–') + '</td><td class="n r">' + esc(r.points) + '</td></tr>'; }).join('') + '</tbody></table></div>' +
+        '<p class="note">The winner shows race time, everyone else the gap to the car directly ahead. ' + (fl ? 'Fastest lap: ' + esc(fl.Driver.givenName + ' ' + fl.Driver.familyName) + ', ' + esc(fl.FastestLap.Time.time) + (fl.FastestLap.AverageSpeed ? ' at ' + esc(fl.FastestLap.AverageSpeed.speed) + ' km/h average.' : '.') : 'Fastest lap data is not available for this race.') + '</p>';
+    },
+    async quali() {
+      const m = await jol(base + '/qualifying.json?limit=100', ttl), Q = (m && m.RaceTable && m.RaceTable.Races[0] && m.RaceTable.Races[0].QualifyingResults) || [];
+      if (!Q.length) return '<p class="note">No qualifying data for this race.</p>';
+      const best = k => Math.min(...Q.map(q => secs(q[k])).filter(Boolean));
+      const b = { Q1: best('Q1'), Q2: best('Q2'), Q3: best('Q3') };
+      const cell = (q, k) => '<td class="n r ' + (q[k] && secs(q[k]) === b[k] ? 'pp' : '') + '">' + esc(q[k] || '–') + '</td>';
+      return '<div class="scroll"><table class="tbl"><thead><tr><th>Pos</th><th>Driver</th><th>Team</th><th class="r">Q1</th><th class="r">Q2</th><th class="r">Q3</th></tr></thead><tbody>' +
+        Q.map(q => { const d = drv.get(q.Driver.driverId) || { acr: q.Driver.code || q.Driver.familyName.slice(0, 3).toUpperCase(), name: q.Driver.givenName + ' ' + q.Driver.familyName, color: teamCol(q.Constructor.constructorId) }; return '<tr><td class="n"><span class="pos">' + esc(q.position) + '</span></td><td>' + dc(d) + '</td><td class="muted">' + esc(q.Constructor.name) + '</td>' + cell(q, 'Q1') + cell(q, 'Q2') + cell(q, 'Q3') + '</tr>'; }).join('') + '</tbody></table></div><p class="note">Purple is the fastest time of each knockout segment.</p>';
+    },
+    async laps() {
+      if (!cache.laps) {
+        const by = new Map(); let off = 0, total = Infinity, lim = 1000, guard = 0;
+        while (off < total && guard++ < 40) {
+          const m = await jol(base + '/laps.json?limit=' + lim + '&offset=' + off, ttl); if (!m) break;
+          total = Number(m.total) || 0; const L = (m.RaceTable.Races[0] || {}).Laps || [];
+          L.forEach(l => (l.Timings || []).forEach(t => { if (!by.has(t.driverId)) by.set(t.driverId, []); by.get(t.driverId).push({ lap: Number(l.number), pos: Number(t.position), t: secs(t.time) }); }));
+          const got = Number(m.limit) || lim; off += got; lim = got; if (!L.length) break;
+        }
+        for (const a of by.values()) a.sort((p, q) => p.lap - q.lap);
+        cache.laps = by;
+      }
+      if (!cache.laps.size) return '<p class="note">OpenF1 does not cover this season and the archive has no lap times for this race.</p>';
+      return '<h2>Lap times</h2><p class="muted" style="margin:2px 0 8px">Hover to compare drivers lap by lap.</p><div class="chips" id="cchips"></div><div class="btns" style="margin:6px 0 10px"><button class="btn ghost" data-sel="3" type="button">Top 3</button><button class="btn ghost" data-sel="10" type="button">Top 10</button><button class="btn ghost" data-sel="99" type="button">Everyone</button><label class="check"><input type="checkbox" id="cslow"> Include slow laps</label></div><div class="panel"><div id="clap"></div></div>' +
+        '<h2 style="margin-top:30px">Race positions</h2><div class="panel" style="margin-top:8px"><div id="cpos"></div></div>';
+    },
+    async pits() {
+      const m = await jol(base + '/pitstops.json?limit=100', ttl), P = (m && m.RaceTable && m.RaceTable.Races[0] && m.RaceTable.Races[0].PitStops) || [];
+      if (!P.length) return '<p class="note">No pit stop data for this race.</p>';
+      const dur = p => secs(p.duration), fast = Math.min(...P.map(dur).filter(Boolean));
+      return '<div class="scroll"><table class="tbl"><thead><tr><th>Lap</th><th>Driver</th><th class="r">Stop</th><th class="r">Time of day</th><th class="r">Pit lane time</th></tr></thead><tbody>' +
+        P.slice().sort((a, b) => Number(a.lap) - Number(b.lap) || Number(a.stop) - Number(b.stop)).map(p => { const d = drv.get(p.driverId) || { acr: p.driverId, name: p.driverId, color: '#8d9ba9' }; return '<tr><td class="n">' + esc(p.lap) + '</td><td>' + dc(d) + '</td><td class="n r">' + esc(p.stop) + '</td><td class="n r muted">' + esc(p.time) + '</td><td class="n r ' + (dur(p) === fast ? 'pp' : '') + '">' + esc(p.duration) + ' s</td></tr>'; }).join('') + '</tbody></table></div><p class="note">The time is the whole trip through the pit lane, not just the stop.</p>';
+    }
+  };
+  const AFTER = {
+    laps() {
+      const by = cache.laps, order = results.map(r => r.Driver.driverId).filter(id => by.has(id)); by.forEach((_, id) => { if (!order.includes(id) && drv.has(id)) order.push(id); });
+      const sel = new Set(order.slice(0, 3)), maxLap = Math.max(...[...by.values()].map(a => a.length ? a[a.length - 1].lap : 0));
+      const best = Math.min(...[...by.values()].flat().map(p => p.t).filter(Boolean));
+      const styled = () => { const used = new Map(); return order.filter(id => sel.has(id)).map(id => { const d = drv.get(id), k = used.get(d.color) || 0; used.set(d.color, k + 1); return { d, id, dash: k ? '6 4' : null }; }); };
+      const lapCfg = () => { const cut = $('#cslow').checked ? Infinity : best * 1.1; return { label: 'Lap times', height: 320, yFmt: G.lapTick, tipFmt: G.lapTime, yWide: true, xMin: 1, xMax: maxLap, series: styled().map(o => ({ name: o.d.acr, color: o.d.color, dash: o.dash, pts: by.get(o.id).map(p => ({ x: p.lap, y: p.t && p.t <= cut ? p.t : null })) })) }; };
+      const posCfg = () => ({ label: 'Race positions', height: 320, invertY: true, yMin: 1, yMax: Math.max(results.length, 2), xMin: 1, xMax: maxLap, tipFmt: v => 'P' + v, yFmt: v => 'P' + Math.round(v), yTicks: Array.from({ length: results.length }, (_, i) => i + 1).filter(v => v === 1 || v % 2 === 0), series: styled().map(o => ({ name: o.d.acr, color: o.d.color, dash: o.dash, pts: by.get(o.id).map(p => ({ x: p.lap, y: p.pos || null })) })) });
+      const lc = G.lineChart($('#clap'), lapCfg()), pc = G.lineChart($('#cpos'), posCfg());
+      const refresh = () => { lc.update(lapCfg()); pc.update(posCfg()); };
+      function chips() { $('#cchips').innerHTML = order.map(id => G.chip(drv.get(id), sel.has(id))).join(''); $$('#cchips .chip').forEach(c => c.onclick = () => { const id = c.dataset.n; if (sel.has(id)) sel.delete(id); else sel.add(id); chips(); refresh(); }); }
+      chips();
+      $$('[data-sel]').forEach(b => b.onclick = () => { sel.clear(); order.slice(0, Number(b.dataset.sel)).forEach(id => sel.add(id)); chips(); refresh(); });
+      $('#cslow').onchange = () => lc.update(lapCfg());
+    }
+  };
+  drawTabs(); show();
+};
+
+/* =========================================================
+   CHAMPIONSHIP (standings from Jolpica, fireworks when the title is decided)
+   ========================================================= */
+function fireworks(canvas, ms) {
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return { stop() {} };
+  const ctx = canvas.getContext('2d'), dpr = Math.min(2, window.devicePixelRatio || 1);
+  const r0 = canvas.getBoundingClientRect(); canvas.width = Math.max(1, r0.width * dpr); canvas.height = Math.max(1, r0.height * dpr);
+  const colors = ['#ff4b4b', '#f5c518', '#34d17f', '#6e9cff', '#b07dff', '#ffffff', '#ff9d00'];
+  let parts = [], raf = 0, stopped = false; const t0 = performance.now(); let last = t0, nextBurst = t0;
+  function burst(x, y) {
+    const c = colors[Math.floor(Math.random() * colors.length)], n = 55 + Math.floor(Math.random() * 35);
+    for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, s = 1.4 + Math.random() * 4.3; parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, decay: 0.008 + Math.random() * 0.01, color: Math.random() < 0.2 ? '#fff' : c }); }
+  }
+  function frame(now) {
+    const dt = Math.min(40, now - last) / 16.7; last = now;
+    const W = canvas.width / dpr, H = canvas.height / dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.globalCompositeOperation = 'destination-out'; ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+    if (now < t0 + ms && now >= nextBurst) { burst(W * (0.1 + Math.random() * 0.8), H * (0.1 + Math.random() * 0.5)); nextBurst = now + 260 + Math.random() * 420; }
+    parts = parts.filter(q => q.life > 0);
+    for (const q of parts) { q.vy += 0.045 * dt; q.vx *= 0.992; q.x += q.vx * dt; q.y += q.vy * dt; q.life -= q.decay * dt; ctx.globalAlpha = Math.max(0, q.life); ctx.fillStyle = q.color; ctx.beginPath(); ctx.arc(q.x, q.y, 2, 0, 6.2832); ctx.fill(); }
+    ctx.globalAlpha = 1;
+    if (!stopped && (now < t0 + ms || parts.length)) raf = requestAnimationFrame(frame); else ctx.clearRect(0, 0, W, H);
+  }
+  raf = requestAnimationFrame(frame);
+  return { stop() { stopped = true; cancelAnimationFrame(raf); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, canvas.width, canvas.height); } };
+}
+
+pages.championship = async function () {
+  await G.boot('championship', { light: true });
+  const app = $('#app'), nowY = new Date().getFullYear(), qp = new URLSearchParams(location.search);
+  let year = Number(qp.get('y')) || nowY; if (year < 2020 || year > nowY) year = nowY;
+  let kind = qp.get('k') === 'teams' ? 'teams' : 'drivers', fx = null, tok = 0;
+  const years = []; for (let y = nowY; y >= 2020; y--) years.push(y);
+  app.innerHTML = '<h1>Championship</h1><p class="lede" id="clede"></p><div class="controls" style="margin-top:18px"><label>Season<select id="cy">' + years.map(y => '<option value="' + y + '"' + (y === year ? ' selected' : '') + '>' + y + '</option>').join('') + '</select></label><div class="stabs" id="ck" role="tablist" style="margin:0"></div></div><div id="cbox"></div>';
+  const drawTabs = () => { $('#ck').innerHTML = [['drivers', 'Drivers'], ['teams', 'Constructors']].map(k => '<button type="button" class="stab" role="tab" aria-selected="' + (k[0] === kind) + '" data-k="' + k[0] + '"><b>' + k[1] + '</b></button>').join(''); $$('#ck .stab').forEach(b => b.onclick = () => { kind = b.dataset.k; drawTabs(); load(); }); };
+  $('#cy').onchange = e => { year = Number(e.target.value); load(); };
+  const wiki = async url => {
+    try { const t = decodeURIComponent(String(url).split('/wiki/')[1] || ''); if (!t) return null; const j = await G.cached('https://en.wikipedia.org/api/rest_v1/page/summary/' + encodeURIComponent(t), 30 * 864e5); return (j && j.thumbnail && j.thumbnail.source) || null; } catch (e) { return null; }
+  };
+  async function load() {
+    const t = ++tok; if (fx) { fx.stop(); fx = null; }
+    history.replaceState(null, '', '?y=' + year + '&k=' + kind);
+    const box = $('#cbox'); box.innerHTML = G.loading('Loading standings…');
+    let m, sched;
+    try { [m, sched] = await Promise.all([G.jol(year + '/' + (kind === 'teams' ? 'constructorstandings' : 'driverstandings') + '.json?limit=100', fixedTtl(year)), G.jol(year + '.json?limit=100', fixedTtl(year))]); }
+    catch (e) { if (t === tok) box.innerHTML = '<div class="note err"><b>Could not load the standings</b><p>' + esc(e.message) + '</p></div>'; return; }
+    if (t !== tok) return;
+    const sl = m && m.StandingsTable && m.StandingsTable.StandingsLists && m.StandingsTable.StandingsLists[0];
+    const list = sl ? ((kind === 'teams' ? sl.ConstructorStandings : sl.DriverStandings) || []) : [];
+    if (!list.length) { box.innerHTML = '<p class="note">No standings are published for ' + year + ' yet.</p>'; $('#clede').textContent = ''; return; }
+    const races = (sched && sched.RaceTable && sched.RaceTable.Races) || [], now = Date.now();
+    const left = races.filter(r => Date.parse(r.date + 'T' + (r.time || '12:00:00Z')) + 2.5 * 36e5 > now);
+    const sprints = left.filter(r => r.Sprint).length, maxLeft = kind === 'teams' ? left.length * 43 + sprints * 15 : left.length * 25 + sprints * 8;
+    const pts = x => Number(x.points), lead = list.length > 1 ? pts(list[0]) - pts(list[1]) : 1;
+    const decided = year < nowY ? true : (left.length === 0 || lead > maxLeft);
+    const name = x => kind === 'teams' ? x.Constructor.name : x.Driver.givenName + ' ' + x.Driver.familyName;
+    const team = x => kind === 'teams' ? '' : (x.Constructors && x.Constructors[0] ? x.Constructors[0].name : '');
+    const col = x => teamCol(kind === 'teams' ? x.Constructor.constructorId : (x.Constructors && x.Constructors[0] ? x.Constructors[0].constructorId : ''));
+    const ini = x => kind === 'teams' ? x.Constructor.name.slice(0, 3).toUpperCase() : (x.Driver.code || x.Driver.familyName.slice(0, 3).toUpperCase());
+    $('#clede').textContent = year + ' ' + (kind === 'teams' ? 'Constructors' : 'Drivers') + ' championship, after round ' + sl.round + ' of ' + (races.length || '?') + '. ' +
+      (decided ? (year < nowY ? 'Final standings.' : 'The title is decided.') : 'Still ' + maxLeft + ' points up for grabs, the leader is ' + lead + ' ahead.');
+    const card = (x, k) => '<article class="pc p' + k + '" style="--tc:' + col(x) + '">' + (k === 1 ? '<span class="crown">' + (decided ? (year < nowY ? 'Champion ' + year : 'Champion') : 'Leader') + '</span>' : '<span class="pos2 num">P' + k + '</span>') +
+      '<div class="ph ' + (kind === 'teams' ? 'tb' : '') + '" data-i="' + (k - 1) + '"><span class="ini">' + esc(ini(x)) + '</span></div><div class="nm">' + esc(name(x)) + '</div><div class="tm">' + esc(team(x) || (x.wins + (x.wins === '1' ? ' win' : ' wins'))) + '</div><div class="pts num">' + esc(x.points) + '<small> pts</small></div></article>';
+    const top = list.slice(0, 3);
+    box.innerHTML = '<section class="champ" id="champ"><canvas class="fw" id="fw" aria-hidden="true"></canvas><div class="podium">' + (top[1] ? card(top[1], 2) : '<div></div>') + card(top[0], 1) + (top[2] ? card(top[2], 3) : '<div></div>') + '</div>' +
+      (decided ? '<button type="button" class="btn ghost celebrate" id="again">Replay fireworks</button>' : '') + '</section>' +
+      '<div class="scroll" style="margin-top:18px"><table class="tbl"><thead><tr><th>Pos</th><th>' + (kind === 'teams' ? 'Team' : 'Driver') + '</th>' + (kind === 'teams' ? '' : '<th>Team</th>') + '<th class="r">Wins</th><th class="r">Behind</th><th class="r">Points</th></tr></thead><tbody>' +
+      list.map((x, i) => '<tr><td class="n"><span class="pos">' + esc(x.positionText || x.position) + '</span></td><td><span class="tc" style="--tc:' + col(x) + '"></span><b>' + esc(name(x)) + '</b></td>' + (kind === 'teams' ? '' : '<td class="muted">' + esc(team(x)) + '</td>') + '<td class="n r">' + esc(x.wins) + '</td><td class="n r muted">' + (i === 0 ? '–' : '-' + (pts(list[0]) - pts(x))) + '</td><td class="n r"><b>' + esc(x.points) + '</b></td></tr>').join('') + '</tbody></table></div>' +
+      '<p class="note">Standings come from the Jolpica archive. ' + (kind === 'drivers' ? 'Driver photos are from Wikipedia and Wikimedia Commons under their open licences.' : '') + ' The title counts as decided when the lead is bigger than the points still available (25 per race and 8 per sprint for drivers, 43 and 15 for teams).</p>';
+    const play = () => { if (fx) fx.stop(); fx = fireworks($('#fw'), 7000); };
+    if (decided) { play(); $('#again').onclick = play; }
+    if (kind === 'drivers') top.forEach(async (x, i) => { const src = await wiki(x.Driver.url); const el = $('#champ .ph[data-i="' + i + '"]'); if (src && el && t === tok) el.style.backgroundImage = 'url("' + src.replace(/"/g, '%22') + '")'; });
+  }
+  drawTabs(); load();
 };
 
 const p = document.body.dataset.page;
